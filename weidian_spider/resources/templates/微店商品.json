@@ -1,0 +1,12 @@
+{
+    "name": "微店商品",
+    "selectors": {
+        "商品名称": "div.item-title-content",
+        "商品价格": "span.cur-price.wd-theme__price"
+    },
+    "description": "爬取微店详情使用",
+    "created_at": "2024-11-16 14:48:23",
+    "last_used": null,
+    "use_count": 0,
+    "platform": "weidian"
+}

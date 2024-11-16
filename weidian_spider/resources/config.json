@@ -1,0 +1,40 @@
+{
+    "crawler": {
+        "max_retries": 3,
+        "retry_delay": 2,
+        "timeout": 30,
+        "batch_size": 5,
+        "download_media": true,
+        "media_types": [
+            "image",
+            "video"
+        ],
+        "save_path": "E:\\localCode\\weidian_pachong\\weidian_spider\\resources\\downloads"
+    },
+    "ui": {
+        "theme": "default",
+        "font_size": 12,
+        "window_size": [
+            1200,
+            800
+        ],
+        "auto_save": true,
+        "save_interval": 300
+    },
+    "network": {
+        "use_proxy": false,
+        "proxy_list": [],
+        "timeout": 30,
+        "retry_codes": [
+            500,
+            502,
+            503,
+            504
+        ]
+    },
+    "database": {
+        "auto_backup": true,
+        "backup_interval": 86400,
+        "max_backups": 7
+    }
+}

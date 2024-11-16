@@ -1,63 +1,78 @@
-import json
 import os
+import json
 from datetime import datetime
 
 class TemplateManager:
-    """模板管理器"""
-    def __init__(self):
-        self.template_dir = 'templates'
+    def __init__(self, resource_dir):
+        self.template_dir = os.path.join(resource_dir, 'templates')
         if not os.path.exists(self.template_dir):
             os.makedirs(self.template_dir)
-        self.template_file = os.path.join(self.template_dir, 'crawl_templates.json')
-        
+
+    def get_templates(self, platform=None):
+        """获取所有模板"""
+        templates = {}
+        try:
+            for file_name in os.listdir(self.template_dir):
+                if file_name.endswith('.json'):
+                    with open(os.path.join(self.template_dir, file_name), 'r', encoding='utf-8') as f:
+                        template = json.load(f)
+                        if platform is None or template.get('platform') == platform:
+                            templates[template['name']] = template
+            return templates
+        except Exception as e:
+            print(f"Error getting templates: {str(e)}")
+            return {}
+
     def save_template(self, name, selectors, description=""):
         """保存模板"""
         try:
-            templates = self.load_templates()
-            templates[name] = {
+            template_data = {
+                'name': name,
                 'selectors': selectors,
                 'description': description,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'last_used': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'last_used': None,
+                'use_count': 0,
+                'platform': 'weidian'  # 默认平台
             }
             
-            with open(self.template_file, 'w', encoding='utf-8') as f:
-                json.dump(templates, f, ensure_ascii=False, indent=2)
+            file_path = os.path.join(self.template_dir, f"{name}.json")
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(template_data, f, ensure_ascii=False, indent=4)
             return True
         except Exception as e:
             print(f"Error saving template: {str(e)}")
             return False
-            
-    def load_templates(self):
-        """加载所有模板"""
+
+    def load_template(self, name):
+        """加载模板"""
         try:
-            if os.path.exists(self.template_file):
-                with open(self.template_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return {}
+            file_path = os.path.join(self.template_dir, f"{name}.json")
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    template = json.load(f)
+                # 更新使用时间和次数
+                template['last_used'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                template['use_count'] += 1
+                self.save_template(
+                    template['name'],
+                    template['selectors'],
+                    template['description']
+                )
+                return template
+            return None
         except Exception as e:
-            print(f"Error loading templates: {str(e)}")
-            return {}
-            
-    def get_template(self, name):
-        """获取指定模板"""
-        templates = self.load_templates()
-        return templates.get(name)
-        
-    def update_last_used(self, name):
-        """更新模板最后使用时间"""
-        templates = self.load_templates()
-        if name in templates:
-            templates[name]['last_used'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            with open(self.template_file, 'w', encoding='utf-8') as f:
-                json.dump(templates, f, ensure_ascii=False, indent=2)
-                
+            print(f"Error loading template: {str(e)}")
+            return None
+
     def delete_template(self, name):
         """删除模板"""
-        templates = self.load_templates()
-        if name in templates:
-            del templates[name]
-            with open(self.template_file, 'w', encoding='utf-8') as f:
-                json.dump(templates, f, ensure_ascii=False, indent=2)
-            return True
-        return False 
+        try:
+            file_path = os.path.join(self.template_dir, f"{name}.json")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                return True
+            return False
+        except Exception as e:
+            print(f"Error deleting template: {str(e)}")
+            return False 

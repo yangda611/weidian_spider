@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QTabWidget, QLabel, QComboBox, QMessageBox, QFileDialog,
                            QListWidget, QListWidgetItem, QDialog, QScrollArea, QLineEdit,
                            QHeaderView, QProgressDialog, QApplication, QGroupBox,
-                           QDateEdit, QRadioButton, QCheckBox, QSpinBox)
+                           QDateEdit, QRadioButton, QCheckBox, QSpinBox, QInputDialog)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QDate, QTimer, QEvent
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QAction
 from PyQt6.QtCharts import QChartView, QChart, QLineSeries, QValueAxis, QBarSeries, QBarSet, QBarCategoryAxis
@@ -17,10 +17,11 @@ import requests
 import logging
 import time
 
-from .db_manager import DatabaseManager
-from .template_manager import TemplateManager
-from .data_analyzer import DataAnalyzer
-from .retry_manager import RetryManager
+from weidian_spider.db_manager import DatabaseManager
+from weidian_spider.template_manager import TemplateManager
+from weidian_spider.data_analyzer import DataAnalyzer
+from weidian_spider.retry_manager import RetryManager
+import traceback
 
 # 确保资源目录存在
 RESOURCE_DIR = os.path.join(os.path.dirname(__file__), 'resources')
@@ -55,67 +56,228 @@ class LogRedirector(StringIO):
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__()
-        self.is_loaded = False
-        self.setWindowTitle('微店商品爬取工具')
-        self.setGeometry(100, 100, 1200, 800)
-        
-        # 初始化组件
-        self.db = DatabaseManager()
-        self.template_manager = TemplateManager()
-        self.data_analyzer = DataAnalyzer(self.db)
-        self.retry_manager = RetryManager()
-        
-        self.log_entries = []
-        self.crawler_threads = []
-        self.start_button = None
-        self.stop_button = None
-        self.current_selectors = {}
-        
-        # 初始化UI
-        self.init_ui()
-        self.setup_logging()
-        
-        # 初始禁用开始按钮
-        if hasattr(self, 'start_button'):
-            self.start_button.setEnabled(False)
-        
-        # 设置已加载标志
-        self.is_loaded = True
+        try:
+            super().__init__()
+            self.is_loaded = False
+            self.setWindowTitle('微店商品爬取工具')
+            self.setGeometry(100, 100, 1200, 800)
+            
+            # 加载配置
+            self.config = self.load_config()
+            
+            # 初始化组件
+            self.db = DatabaseManager()
+            self.template_manager = TemplateManager(RESOURCE_DIR)  # 传入资源目录
+            self.data_analyzer = DataAnalyzer(self.db)
+            self.retry_manager = RetryManager()
+            
+            self.log_entries = []
+            self.crawler_threads = []
+            self.start_button = None
+            self.stop_button = None
+            self.current_selectors = {}
+            
+            # 初始化UI
+            self.init_ui()
+            self.setup_logging()
+            
+            # 应用配置
+            self.apply_config()
+            
+            # 设置已加载标志
+            self.is_loaded = True
+            
+            self.thread_status = {}
+            self.total_threads = 0
+            self.completed_threads = 0
+            
+        except Exception as e:
+            logging.error("MainWindow initialization failed", exc_info=True)
+            raise
+
+    def load_config(self):
+        """加载配置"""
+        try:
+            config_path = os.path.join(RESOURCE_DIR, 'config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return self.get_default_config()
+        except Exception as e:
+            self.log_message("ERROR", f"加载配失败: {str(e)}")
+            return self.get_default_config()
+
+    def get_default_config(self):
+        """获取默认配置"""
+        return {
+            'crawler': {
+                'max_retries': 3,
+                'retry_delay': 2,
+                'timeout': 30,
+                'batch_size': 5,
+                'download_media': True,
+                'media_types': ['image', 'video'],
+                'save_path': os.path.join(RESOURCE_DIR, 'downloads')
+            },
+            'ui': {
+                'theme': 'default',
+                'font_size': 12,
+                'window_size': [1200, 800],
+                'auto_save': True,
+                'save_interval': 300
+            },
+            'network': {
+                'use_proxy': False,
+                'proxy_list': [],
+                'timeout': 30,
+                'retry_codes': [500, 502, 503, 504]
+            },
+            'database': {
+                'auto_backup': True,
+                'backup_interval': 86400,
+                'max_backups': 7
+            }
+        }
+
+    def save_config(self):
+        """保存配置"""
+        try:
+            config_path = os.path.join(RESOURCE_DIR, 'config.json')
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
+            self.log_message("INFO", "配置已保存")
+        except Exception as e:
+            self.log_message("ERROR", f"保存配置失败: {str(e)}")
+
+    def apply_config(self):
+        """应用配置"""
+        try:
+            # 应用爬虫配置
+            if hasattr(self, 'retry_manager'):
+                self.retry_manager.max_retries = self.config['crawler']['max_retries']
+                self.retry_manager.retry_delay = self.config['crawler']['retry_delay']
+
+            # 应用UI配置
+            if 'ui' in self.config:
+                font_size = self.config['ui']['font_size']
+                self.setStyleSheet(f"""
+                    QWidget {{
+                        font-size: {font_size}px;
+                    }}
+                """)
+                
+                if hasattr(self, 'log_text'):
+                    self.log_text.setStyleSheet(f"""
+                        QTextEdit {{
+                            background-color: #1e1e1e;
+                            color: #ffffff;
+                            font-family: Consolas, Monaco, monospace;
+                            font-size: {font_size}px;
+                            padding: 10px;
+                            border: none;
+                        }}
+                    """)
+
+            # 应用网络配置
+            if 'network' in self.config:
+                if self.config['network']['use_proxy']:
+                    # 设置代理
+                    pass
+
+            # 应用数据库配置
+            if 'database' in self.config and hasattr(self, 'db'):
+                if self.config['database']['auto_backup']:
+                    self.setup_auto_backup()
+
+        except Exception as e:
+            self.log_message("ERROR", f"应用配置失败: {str(e)}")
+
+    def setup_auto_backup(self):
+        """设置自动备份"""
+        try:
+            if self.config['database']['auto_backup']:
+                backup_interval = self.config['database']['backup_interval']
+                self.backup_timer = QTimer(self)
+                self.backup_timer.timeout.connect(self.auto_backup_database)
+                self.backup_timer.start(backup_interval * 1000)  # 转换为毫秒
+        except Exception as e:
+            self.log_message("ERROR", f"设置自动备份失败: {str(e)}")
+
+    def auto_backup_database(self):
+        """自动备份数据库"""
+        try:
+            backup_dir = os.path.join(RESOURCE_DIR, 'backups')
+            if not os.path.exists(backup_dir):
+                os.makedirs(backup_dir)
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = os.path.join(backup_dir, f'backup_{timestamp}.db')
+            
+            self.db.backup_database(backup_path)
+            self.log_message("INFO", f"数据库已自动备份到: {backup_path}")
+            
+            # 清理旧备份
+            self.cleanup_old_backups()
+        except Exception as e:
+            self.log_message("ERROR", f"自动备份失败: {str(e)}")
+
+    def cleanup_old_backups(self):
+        """清理旧备份"""
+        try:
+            backup_dir = os.path.join(RESOURCE_DIR, 'backups')
+            max_backups = self.config['database']['max_backups']
+            
+            backups = sorted([
+                os.path.join(backup_dir, f) 
+                for f in os.listdir(backup_dir) 
+                if f.startswith('backup_') and f.endswith('.db')
+            ])
+            
+            while len(backups) > max_backups:
+                oldest = backups.pop(0)
+                os.remove(oldest)
+                self.log_message("INFO", f"已删除旧备份: {oldest}")
+        except Exception as e:
+            self.log_message("ERROR", f"清旧备份失败: {str(e)}")
 
     def init_ui(self):
         """初始化用户界面"""
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-        
-        # 创建菜单栏
-        self.create_menu_bar()
-        
-        # 创建工具栏
-        self.create_toolbar()
-        
-        # 创建标签页
-        self.tabs = QTabWidget()  # 保存引用以便后续使用
-        layout.addWidget(self.tabs)
-        
-        # 爬取页面
-        crawl_tab = self.create_crawl_tab()
-        self.tabs.addTab(crawl_tab, "爬取")
-        
-        # 历史记录页面
-        history_tab = self.create_history_tab()
-        self.tabs.addTab(history_tab, "历史记录")
-        
-        # 日志页面
-        log_tab = self.create_log_tab()
-        self.tabs.addTab(log_tab, "系统日志")
-        
-        # 状态栏
-        self.statusBar().showMessage('就绪')
-        
-        # 禁用爬取页面的控件
-        self.disable_crawl_controls(True)
+        try:
+            central_widget = QWidget()
+            self.setCentralWidget(central_widget)
+            layout = QVBoxLayout(central_widget)
+            
+            # 创建菜单栏
+            self.create_menu_bar()
+            
+            # 创建工具栏
+            self.create_toolbar()
+            
+            # 创建标签页
+            self.tabs = QTabWidget()
+            layout.addWidget(self.tabs)
+            
+            # 爬取页面
+            crawl_tab = self.create_crawl_tab()
+            self.tabs.addTab(crawl_tab, "爬取")
+            
+            # 历史记录页面
+            history_tab = self.create_history_tab()
+            self.tabs.addTab(history_tab, "历史记录")
+            
+            # 日志页面
+            log_tab = self.create_log_tab()
+            self.tabs.addTab(log_tab, "系统日志")
+            
+            # 状态栏
+            self.statusBar().showMessage('就绪')
+            
+            # 移除这行，因为它会覆盖其他设置
+            # self.disable_crawl_controls(True)
+            
+        except Exception as e:
+            logging.error("UI initialization failed", exc_info=True)
+            raise
 
     def show_about(self):
         """显示关于对话框"""
@@ -123,7 +285,7 @@ class MainWindow(QMainWindow):
             about_text = """
             <h2>微店商品爬取工具</h2>
             <p>版本: 1.0.0</p>
-            <p>一个用于爬取微店商品信息的工具，支持：</p>
+            <p>一用于爬取微店商品信息的具，支持：</p>
             <ul>
                 <li>自定义选择爬取内容</li>
                 <li>批量爬取商品信息</li>
@@ -202,7 +364,7 @@ class MainWindow(QMainWindow):
             print(f"Error logging message: {str(e)}")
 
     def get_log_color(self, level):
-        """获取日志级别对应的颜色"""
+        """获取日志级别"""
         colors = {
             "INFO": "#00FF00",    # 绿色
             "WARNING": "#FFA500",  # 橙色
@@ -285,7 +447,7 @@ class MainWindow(QMainWindow):
         filter_group.setLayout(filter_layout)
         layout.addWidget(filter_group)
         
-        # 日志显示区域
+        # 志显示区域
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet("""
@@ -300,7 +462,7 @@ class MainWindow(QMainWindow):
         """)
         layout.addWidget(self.log_text)
         
-        # 按钮组
+        # 钮组
         btn_layout = QHBoxLayout()
         
         clear_btn = QPushButton("清空日志")
@@ -328,7 +490,7 @@ class MainWindow(QMainWindow):
         import_action.triggered.connect(self.import_urls)
         file_menu.addAction(import_action)
         
-        export_action = QAction('导出数据', self)
+        export_action = QAction('导出数', self)
         export_action.setShortcut('Ctrl+E')
         export_action.setStatusTip('导出爬取的数据')
         export_action.triggered.connect(self.export_data)
@@ -411,7 +573,7 @@ class MainWindow(QMainWindow):
     def export_data(self):
         """导出数据"""
         try:
-            # 检查是否有数据可导出
+            # 检查是有据导
             records = self.db.get_all_records()
             if not records:
                 QMessageBox.warning(self, "警告", "没有可导出的数据！")
@@ -419,7 +581,7 @@ class MainWindow(QMainWindow):
 
             # 选择导出格式
             format_dialog = QDialog(self)
-            format_dialog.setWindowTitle("选择导出格式")
+            format_dialog.setWindowTitle("选择导出格")
             layout = QVBoxLayout(format_dialog)
 
             format_group = QGroupBox("导出格式")
@@ -502,7 +664,7 @@ class MainWindow(QMainWindow):
                     )
 
                     if success:
-                        self.log_message("INFO", f"��据已导出到: {file_name}")
+                        self.log_message("INFO", f"据已导出到: {file_name}")
                         QMessageBox.information(self, "成功", "数据导出成功！")
                     else:
                         self.log_message("ERROR", f"导出失败: {message}")
@@ -560,29 +722,94 @@ class MainWindow(QMainWindow):
             self.history_table.setRowCount(len(records))
             
             for i, record in enumerate(records):
-                data = json.loads(record['data'])
-                
-                self.history_table.setItem(i, 0, QTableWidgetItem(record['timestamp']))
-                self.history_table.setItem(i, 1, QTableWidgetItem(record['platform']))
-                self.history_table.setItem(i, 2, QTableWidgetItem(data.get('title', '')))
-                self.history_table.setItem(i, 3, QTableWidgetItem(f"¥{data.get('price', '')}"))
-                
-                # 操作按钮
-                btn_widget = QWidget()
-                btn_layout = QHBoxLayout(btn_widget)
-                btn_layout.setContentsMargins(2, 2, 2, 2)
-                
-                view_btn = QPushButton("查看")
-                view_btn.clicked.connect(lambda checked, r=record: self.view_details(r))
-                btn_layout.addWidget(view_btn)
-                
-                self.history_table.setCellWidget(i, 4, btn_widget)
-                
+                try:
+                    # 获取数据并确保是字典格式
+                    data = record['data']
+                    if isinstance(data, str):
+                        try:
+                            data = json.loads(data)
+                        except json.JSONDecodeError:
+                            self.log_message("WARNING", f"记录 {i+1} 的数据格式错误，跳过显示")
+                            continue
+                    
+                    if not isinstance(data, dict):
+                        self.log_message("WARNING", f"记录 {i+1} 的数据类型错误，跳过显示")
+                        continue
+                    
+                    # 设置表格内容
+                    self.history_table.setItem(i, 0, QTableWidgetItem(record['timestamp']))
+                    self.history_table.setItem(i, 1, QTableWidgetItem(record['platform']))
+                    
+                    # 获取标题和价格
+                    title = "未知标题"
+                    price = "未知价格"
+                    
+                    # 遍历所有键值对查找标题和价格
+                    for key, value in data.items():
+                        if not value:  # 跳过空值
+                            continue
+                            
+                        key = str(key).lower()
+                        if any(word in key for word in ['title', '标题', '名称']):
+                            if isinstance(value, list):
+                                title = value[0] if value else "未知标题"
+                            else:
+                                title = str(value)
+                        elif any(word in key for word in ['price', '价格']):
+                            if isinstance(value, list):
+                                price = value[0] if value else "未知价格"
+                            else:
+                                price = str(value)
+                    
+                    self.history_table.setItem(i, 2, QTableWidgetItem(str(title)))
+                    self.history_table.setItem(i, 3, QTableWidgetItem(f"¥{price}"))
+                    
+                    # 操作按钮
+                    btn_widget = QWidget()
+                    btn_layout = QHBoxLayout(btn_widget)
+                    btn_layout.setContentsMargins(2, 2, 2, 2)
+                    
+                    view_btn = QPushButton("查看")
+                    view_btn.clicked.connect(lambda checked, r=record: self.view_details(r))
+                    btn_layout.addWidget(view_btn)
+                    
+                    delete_btn = QPushButton("删除")
+                    delete_btn.clicked.connect(lambda checked, r=record: self.delete_record(r))
+                    btn_layout.addWidget(delete_btn)
+                    
+                    self.history_table.setCellWidget(i, 4, btn_widget)
+                    
+                except Exception as e:
+                    self.log_message("ERROR", f"处理记录 {i+1} 失败: {str(e)}")
+                    continue  # 跳过错误的记录，继续处理下一个
+                    
             self.log_message("INFO", "历史记录已刷新")
             
         except Exception as e:
             self.log_message("ERROR", f"刷新历史记录失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"刷新失败: {str(e)}")
+
+    def delete_record(self, record):
+        """删除记录"""
+        try:
+            reply = QMessageBox.question(
+                self,
+                '确认删除',
+                '确定要删除这条记录吗？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                if self.db.delete_record(record['id']):
+                    self.log_message("INFO", "记录已删除")
+                    self.refresh_history()
+                else:
+                    raise Exception("删除失败")
+                    
+        except Exception as e:
+            self.log_message("ERROR", f"删除记录失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"删除失败: {str(e)}")
 
     def show_template_manager(self):
         """显示模板管理器"""
@@ -691,7 +918,7 @@ class MainWindow(QMainWindow):
             content_layout = QVBoxLayout()
             
             checkboxes = {}
-            for item in ["商品标题", "商品价格", "商品规格", "商品主图", "详情图片"]:
+            for item in ["商品标题", "商品价格", "商规格", "商品主图", "详情图片"]:
                 cb = QCheckBox(item)
                 checkboxes[item] = cb
                 content_layout.addWidget(cb)
@@ -699,7 +926,7 @@ class MainWindow(QMainWindow):
             content_group.setLayout(content_layout)
             layout.addWidget(content_group)
             
-            # 按钮
+            # 按
             btn_layout = QHBoxLayout()
             save_btn = QPushButton("保存")
             save_btn.clicked.connect(lambda: self.save_template(
@@ -794,7 +1021,7 @@ class MainWindow(QMainWindow):
             dialog.exec()
             
         except Exception as e:
-            self.log_message("ERROR", f"编辑模板失败: {str(e)}")
+            self.log_message("ERROR", f"编辑板失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"编辑失败: {str(e)}")
 
     def update_template(self, dialog, name, description, selections):
@@ -882,7 +1109,7 @@ class MainWindow(QMainWindow):
             
             layout.addWidget(task_table)
             
-            # 按钮组
+            # 按组
             btn_layout = QHBoxLayout()
             
             retry_all_btn = QPushButton("全部重试")
@@ -909,9 +1136,9 @@ class MainWindow(QMainWindow):
         """重试单个失败任务"""
         try:
             if self.retry_manager.should_retry(task_id):
-                self.log_message("INFO", f"正在重试任务: {task_id}")
+                self.log_message("INFO", f"正在重试任: {task_id}")
                 
-                # 创建新的爬虫线程
+                # 创建的爬虫线程
                 thread = CrawlerThread(task_id, "微店", self.current_selectors)
                 thread.progress.connect(self.handle_progress)
                 thread.result.connect(self.handle_crawler_result)
@@ -940,10 +1167,10 @@ class MainWindow(QMainWindow):
             if retry_count > 0:
                 self.log_message("INFO", f"已重试 {retry_count} 个任务")
             else:
-                QMessageBox.information(self, "提示", "没有可重试的任务")
+                QMessageBox.information(self, "提示", "没有可重试的任")
                 
         except Exception as e:
-            self.log_message("ERROR", f"批量重试任务失败: {str(e)}")
+            self.log_message("ERROR", f"批重试任务失: {str(e)}")
             QMessageBox.critical(self, "错误", f"重试失败: {str(e)}")
 
     def remove_failed_task(self, task_id):
@@ -973,7 +1200,7 @@ class MainWindow(QMainWindow):
                 
             reply = QMessageBox.question(
                 self,
-                '确认清空',
+                '认清空',
                 '确定要清空所有失败任务吗？',
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
@@ -1012,13 +1239,13 @@ class MainWindow(QMainWindow):
         # 开始爬取按钮
         start_btn = QPushButton('开始爬取')
         start_btn.setIcon(QIcon(get_icon_path('start')))
-        start_btn.setStatusTip('开始爬取商品信息')
+        start_btn.setStatusTip('���始爬取商品信息')
         start_btn.clicked.connect(self.start_crawling)
         start_btn.setEnabled(False)  # 默认禁用
         self.start_button = start_btn
         toolbar.addWidget(start_btn)
         
-        # 停止爬取按钮
+        # 停止取按钮
         stop_btn = QPushButton('停止爬取')
         stop_btn.setIcon(QIcon(get_icon_path('stop')))
         stop_btn.setStatusTip('停止爬取')
@@ -1031,9 +1258,12 @@ class MainWindow(QMainWindow):
 
     def check_start_button_state(self):
         """检查并更新开始按钮状态"""
-        if hasattr(self, 'start_button') and hasattr(self, 'url_list'):
-            # 只有当URL列表不为空时才启用开始按钮
-            self.start_button.setEnabled(self.url_list.count() > 0)
+        try:
+            if hasattr(self, 'start_button') and hasattr(self, 'url_list'):
+                # 只有当URL列表不为空时才启用开始按钮
+                self.start_button.setEnabled(self.url_list.count() > 0)
+        except Exception as e:
+            logging.error(f"Error checking start button state: {str(e)}")
 
     def start_crawling(self):
         """开始爬取"""
@@ -1049,7 +1279,7 @@ class MainWindow(QMainWindow):
                 
             selected_elements = selector_dialog.selected_elements
             
-            if not selected_elements:
+            if not selected_elements or not selected_elements.get('selectors'):
                 QMessageBox.warning(self, "警告", "请选择要爬取的元素！")
                 return
                 
@@ -1065,24 +1295,34 @@ class MainWindow(QMainWindow):
             # 清空之前的线程
             self.clean_threads()
             
-            # 开始爬取
+            # 获取总URL数量
             total_urls = self.url_list.count()
             self.log_message("INFO", f"开始爬取 {total_urls} 个商品...")
             
+            # 保存当前选择器
+            self.current_selectors = selected_elements
+            
+            # 创建并启动爬虫线程
             for i in range(total_urls):
                 item = self.url_list.item(i)
                 url = item.text()
                 
-                # 创建爬虫线程
                 thread = CrawlerThread(url, "微店", selected_elements)
                 thread.progress.connect(self.handle_progress)
                 thread.result.connect(self.handle_crawler_result)
-                thread.finished.connect(lambda success, total=total_urls: 
-                    self.handle_crawler_finished(success, total))
+                thread.finished.connect(lambda success, t=total_urls: 
+                    self.handle_crawler_finished(success, t))
                 thread.error.connect(self.handle_crawler_error)
+                thread.status_changed.connect(lambda status, u=url: 
+                    self.handle_status_changed(u, status))
+                thread.retry_count_changed.connect(lambda count, u=url: 
+                    self.handle_retry_count_changed(u, count))
                 
                 self.crawler_threads.append(thread)
                 thread.start()
+                
+                # 添加延迟，避免同时打开太多浏览器
+                time.sleep(1)
             
             # 更新状态栏
             self.update_status(f"正在爬取 {total_urls} 个商品...")
@@ -1091,6 +1331,50 @@ class MainWindow(QMainWindow):
             self.log_message("ERROR", f"爬取过程出错: {str(e)}")
             QMessageBox.critical(self, "错误", f"爬取失败: {str(e)}")
             self.disable_crawl_controls(False)
+
+    def handle_status_changed(self, url, status):
+        """处理线程状态变化"""
+        try:
+            if url in self.thread_status:
+                self.thread_status[url]['status'] = status
+                self.update_progress_display()
+        except Exception as e:
+            self.log_message("ERROR", f"更新状态失败: {str(e)}")
+
+    def handle_retry_count_changed(self, url, count):
+        """处理重试次数变化"""
+        try:
+            if url in self.thread_status:
+                self.thread_status[url]['retries'] = count
+                self.update_progress_display()
+        except Exception as e:
+            self.log_message("ERROR", f"更新重试次数失败: {str(e)}")
+
+    def update_progress_display(self):
+        """更新进度显示"""
+        try:
+            status_counts = {
+                'success': 0,
+                'failed': 0,
+                'running': 0,
+                'retrying': 0
+            }
+            
+            for status in self.thread_status.values():
+                if status['status'] in status_counts:
+                    status_counts[status['status']] += 1
+            
+            status_text = (
+                f"成功: {status_counts['success']} | "
+                f"失败: {status_counts['failed']} | "
+                f"运行中: {status_counts['running']} | "
+                f"重试中: {status_counts['retrying']}"
+            )
+            
+            self.update_status(status_text)
+            
+        except Exception as e:
+            self.log_message("ERROR", f"更新进度显示失败: {str(e)}")
 
     def disable_crawl_controls(self, disabled=True):
         """禁用/启用爬取页面的控件"""
@@ -1135,7 +1419,7 @@ class MainWindow(QMainWindow):
                 self.update_status("爬取完成")
                 
         except Exception as e:
-            self.log_message("ERROR", f"处理爬完成事件失败: {str(e)}")
+            self.log_message("ERROR", f"处理爬虫完成事件失败: {str(e)}")
 
     def stop_crawling(self):
         """停止爬取"""
@@ -1236,7 +1520,7 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         add_btn = QPushButton("添加")
         add_btn.clicked.connect(self.add_url)
-        clear_input_btn = QPushButton("清空输入")
+        clear_input_btn = QPushButton("空输入")
         clear_input_btn.clicked.connect(self.url_input.clear)
         btn_layout.addWidget(add_btn)
         btn_layout.addWidget(clear_input_btn)
@@ -1246,7 +1530,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(input_group)
         
         # URL列表
-        list_group = QGroupBox("链接列表")
+        list_group = QGroupBox("链接列")
         list_layout = QVBoxLayout()
         
         self.url_list = QListWidget()
@@ -1349,7 +1633,7 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 for item in selected_items:
                     self.url_list.takeItem(self.url_list.row(item))
-                self.log_message("INFO", f"已删除 {len(selected_items)} 个链接")
+                self.log_message("INFO", f"已删 {len(selected_items)} 个链接")
                 
                 # 更新开始按钮状态
                 self.check_start_button_state()
@@ -1440,7 +1724,7 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.log_message("ERROR", f"导出选中数据失败: {str(e)}")
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"导失败: {str(e)}")
 
     def import_template(self):
         """导入模板"""
@@ -1464,7 +1748,7 @@ class MainWindow(QMainWindow):
                         template_data.get('description', '')
                     )
                     self.log_message("INFO", f"模板 '{template_data['name']}' 已导入")
-                    QMessageBox.information(self, "成功", "模板导入成功！")
+                    QMessageBox.information(self, "成功", "模板导成功！")
                 else:
                     QMessageBox.warning(self, "错误", "无效的模板文件！")
                     
@@ -1477,7 +1761,7 @@ class MainWindow(QMainWindow):
         try:
             selected_items = template_table.selectedItems()
             if not selected_items:
-                QMessageBox.warning(self, "警告", "请选择要导出的模板！")
+                QMessageBox.warning(self, "警告", "请选择要导出模板！")
                 return
                 
             template_name = selected_items[0].text()
@@ -1540,7 +1824,7 @@ class MainWindow(QMainWindow):
                 reply = QMessageBox.question(
                     self,
                     '模板已存在',
-                    f'模板 "{template_data["name"]}" 已存在，是否覆��？',
+                    f'模板 "{template_data["name"]}" 已存在，是否覆？',
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No
                 )
@@ -1548,7 +1832,7 @@ class MainWindow(QMainWindow):
                 if reply != QMessageBox.StandardButton.Yes:
                     return False
                     
-            # 保存板
+            # 保存模板
             self.template_manager.save_template(
                 template_data['name'],
                 template_data['selectors'],
@@ -1598,12 +1882,22 @@ class MainWindow(QMainWindow):
     def handle_crawler_result(self, result):
         """处理爬虫结果"""
         try:
-            # 保存到数据库
-            self.db.save_record(result)
-            self.log_message("INFO", f"数据已保存: {json.loads(result['data'])['title']}")
+            # 获取标题用于显示
+            title = "未知标题"
+            for key, value in result['data'].items():
+                if 'title' in key.lower() and value:
+                    title = value if isinstance(value, str) else value[0]
+                    break
             
-            # 更新历史记录表格
-            self.refresh_history()
+            # 保存到数据库
+            record_id = self.db.save_record(result)
+            
+            if record_id:
+                self.log_message("INFO", f"数据已保存: {title}")
+                # 更新历史记录表格
+                self.refresh_history()
+            else:
+                raise Exception("保存记录失败")
             
         except Exception as e:
             self.log_message("ERROR", f"保存数据失败: {str(e)}")
@@ -1611,7 +1905,7 @@ class MainWindow(QMainWindow):
 
     def handle_crawler_error(self, url, error):
         """处理爬虫错误"""
-        self.log_message("ERROR", f"取 {url} 失败: {error}")
+        self.log_message("ERROR", f" {url} 失败: {error}")
         if self.retry_manager.should_retry(url):
             self.log_message("INFO", f"准备重试: {url}")
             self.retry_manager.add_retry(url)
@@ -1630,68 +1924,72 @@ class MainWindow(QMainWindow):
     def view_details(self, record):
         """查看商品详情"""
         try:
-            data = json.loads(record['data'])
+            # 获取数据并确保是字典格式
+            data = record['data']
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except json.JSONDecodeError:
+                    raise Exception("数据格式错误")
+            
+            if not isinstance(data, dict):
+                raise Exception("数据类型错误")
+            
             dialog = QDialog(self)
             dialog.setWindowTitle("商品详情")
             dialog.setMinimumSize(800, 600)
             
             layout = QVBoxLayout(dialog)
             
-            # 使QTextEdit显示Markdown格式的详情
+            # 使用QTextEdit显示Markdown格式的详情
             detail_text = QTextEdit()
             detail_text.setReadOnly(True)
             
             # 构建Markdown格式的商品信息
-            markdown_text = f"""
-# {data['title']}
-
-## 基本信息
-- **价格**: ¥{data['price']}
-- **商品规格**: {', '.join(data.get('specs', []))}
-- **商品ID**: {data.get('item_id', '')}
-- **商品链接**: {record['url']}
-
-## 商品描述
-{data.get('description', '')}
-            """
+            markdown_text = "# 商品详情\n\n"
+            
+            # 添加所有数据
+            for key, value in data.items():
+                if value:  # 跳过空值
+                    markdown_text += f"\n## {key}\n"
+                    if isinstance(value, list):
+                        if key.lower().endswith(('images', 'imgs', 'pictures')):
+                            # 图片显示
+                            for i, img_url in enumerate(value, 1):
+                                markdown_text += f"\n![图片{i}]({img_url})\n"
+                        else:
+                            # 列表显示
+                            for item in value:
+                                markdown_text += f"- {item}\n"
+                    else:
+                        # 单个值显示
+                        markdown_text += f"{value}\n"
+            
+            # 添加基本信息
+            markdown_text += f"\n## 其他信息\n"
+            markdown_text += f"- **URL**: {record['url']}\n"
+            markdown_text += f"- **平台**: {record['platform']}\n"
+            markdown_text += f"- **爬取时间**: {record['timestamp']}\n"
+            if record.get('status'):
+                markdown_text += f"- **状态**: {record['status']}\n"
             
             detail_text.setMarkdown(markdown_text)
             layout.addWidget(detail_text)
             
-            # 图片预览区域
-            images_scroll = QScrollArea()
-            images_widget = QWidget()
-            images_layout = QHBoxLayout(images_widget)
-            
-            # 主图预览
-            if 'main_images' in data:
-                for i, img_url in enumerate(data['main_images'].split(',')):
-                    if img_url:
-                        img_label = QLabel()
-                        pixmap = QPixmap()
-                        try:
-                            response = requests.get(img_url)
-                            pixmap.loadFromData(response.content)
-                            pixmap = pixmap.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio)
-                            img_label.setPixmap(pixmap)
-                            img_label.setToolTip("点击查看大图")
-                            img_label.mousePressEvent = lambda _, url=img_url: self.show_full_image(url)
-                            images_layout.addWidget(img_label)
-                        except Exception as e:
-                            self.log_message("ERROR", f"加载图片失败: {str(e)}")
-                            continue
-            
-            images_scroll.setWidget(images_widget)
-            images_scroll.setFixedHeight(220)
-            layout.addWidget(images_scroll)
-            
             # 按钮组
             btn_layout = QHBoxLayout()
             
+            # 导出按钮
             export_btn = QPushButton("导出详情")
-            export_btn.clicked.connect(lambda: self.export_details(data))
+            export_btn.clicked.connect(lambda: self.export_details(record))
             btn_layout.addWidget(export_btn)
             
+            # 复制链接按钮
+            copy_url_btn = QPushButton("复制链接")
+            copy_url_btn.clicked.connect(lambda: self.copy_to_clipboard(record['url']))
+            btn_layout.addWidget(copy_url_btn)
+            
+            # 关闭按钮
             close_btn = QPushButton("关闭")
             close_btn.clicked.connect(dialog.close)
             btn_layout.addWidget(close_btn)
@@ -1703,6 +2001,66 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log_message("ERROR", f"显示详情失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"无法显示详情: {str(e)}")
+
+    def export_details(self, record):
+        """导出详情"""
+        try:
+            # 获取数据并确保是字典格式
+            data = record['data']
+            if isinstance(data, str):
+                data = json.loads(data)
+            
+            file_name, _ = QFileDialog.getSaveFileName(
+                self,
+                "导出详情",
+                f"商品详情_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                "Markdown Files (*.md);;All Files (*)"
+            )
+            
+            if file_name:
+                # 构建Markdown内容
+                markdown_text = f"# 商品详情\n\n"
+                markdown_text += f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                
+                # 添加所有数据
+                for key, value in data.items():
+                    if value:
+                        markdown_text += f"\n## {key}\n"
+                        if isinstance(value, list):
+                            if key.lower().endswith(('images', 'imgs', 'pictures')):
+                                for i, img_url in enumerate(value, 1):
+                                    markdown_text += f"\n![图片{i}]({img_url})\n"
+                            else:
+                                for item in value:
+                                    markdown_text += f"- {item}\n"
+                        else:
+                            markdown_text += f"{value}\n"
+                
+                # 添加基本信息
+                markdown_text += f"\n## 其他信息\n"
+                markdown_text += f"- **URL**: {record['url']}\n"
+                markdown_text += f"- **平台**: {record['platform']}\n"
+                markdown_text += f"- **爬取时间**: {record['timestamp']}\n"
+                
+                # 保存文件
+                with open(file_name, 'w', encoding='utf-8') as f:
+                    f.write(markdown_text)
+                    
+                self.log_message("INFO", f"详情已导出到: {file_name}")
+                QMessageBox.information(self, "成功", "详情导出成功！")
+                
+        except Exception as e:
+            self.log_message("ERROR", f"导出详情失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+
+    def copy_to_clipboard(self, text):
+        """复制文本到剪贴板"""
+        try:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+            self.log_message("INFO", "已复制到剪贴板")
+        except Exception as e:
+            self.log_message("ERROR", f"复制到剪贴板失败: {str(e)}")
 
     def show_full_image(self, img_url):
         """显示完整大图"""
@@ -1745,53 +2103,6 @@ class MainWindow(QMainWindow):
             self.log_message("ERROR", f"显示大图失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"无法显示图片: {str(e)}")
 
-    def export_details(self, data):
-        """导出商品详情"""
-        try:
-            file_name, _ = QFileDialog.getSaveFileName(
-                self,
-                "导出详情",
-                f"{data['title']}.md",
-                "Markdown Files (*.md);;All Files (*)"
-            )
-            
-            if file_name:
-                markdown_text = f"""# {data['title']}
-
-## 基本信息
-- **价格**: ¥{data['price']}
-- **商品规格**: {', '.join(data.get('specs', []))}
-- **商品ID**: {data.get('item_id', '')}
-- **商品链接**: {data.get('url', '')}
-
-## 商品描述
-{data.get('description', '')}
-
-## 商品图片
-"""
-                # 添加图片链接
-                if 'main_images' in data:
-                    markdown_text += "\n### 主图\n"
-                    for i, img_url in enumerate(data['main_images'].split(',')):
-                        if img_url:
-                            markdown_text += f"\n![商品主图{i+1}]({img_url})"
-                
-                if 'detail_images' in data:
-                    markdown_text += "\n\n### 详情图\n"
-                    for i, img_url in enumerate(data['detail_images'].split(',')):
-                        if img_url:
-                            markdown_text += f"\n![商品详情图{i+1}]({img_url})"
-                
-                with open(file_name, 'w', encoding='utf-8') as f:
-                    f.write(markdown_text)
-                    
-                self.log_message("INFO", f"详情已导出到: {file_name}")
-                QMessageBox.information(self, "成功", "详情导出成功！")
-                
-        except Exception as e:
-            self.log_message("ERROR", f"导出详情失败: {str(e)}")
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
-
     def update_chart_sizes(self):
         """更图表大小"""
         try:
@@ -1824,9 +2135,24 @@ class MainWindow(QMainWindow):
             
             if reply == QMessageBox.StandardButton.Yes:
                 self.log_message("INFO", "程序正在关闭...")
-                self.clean_threads()
+                
+                # 停止所有爬虫线程
+                self.stop_all_threads()
+                
+                # 关闭数据库连接
                 if hasattr(self, 'db'):
                     self.db.close()
+                
+                # 清理临时文件
+                self.cleanup_temp_files()
+                
+                # 保存配置
+                if hasattr(self, 'config'):
+                    self.save_config()
+                
+                # 等待所有线程完全停止
+                self.wait_for_threads()
+                
                 event.accept()
             else:
                 event.ignore()
@@ -1834,6 +2160,52 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log_message("ERROR", f"程序关闭时出错: {str(e)}")
             event.accept()
+
+    def stop_all_threads(self):
+        """停止所有线程"""
+        try:
+            # 停止爬虫线程
+            for thread in self.crawler_threads:
+                if thread.isRunning():
+                    thread.stop()
+                    thread.wait(1000)  # 等待最多1秒
+                    if thread.isRunning():
+                        thread.terminate()  # 强制终止
+            
+            self.crawler_threads.clear()
+            self.log_message("INFO", "所有爬虫线程已停止")
+            
+        except Exception as e:
+            self.log_message("ERROR", f"停止线程失败: {str(e)}")
+
+    def cleanup_temp_files(self):
+        """清理临时文件"""
+        try:
+            # 清理临时目录
+            temp_dir = os.path.join(RESOURCE_DIR, 'temp')
+            if os.path.exists(temp_dir):
+                import shutil
+                shutil.rmtree(temp_dir)
+            
+            self.log_message("INFO", "临时文件已清理")
+            
+        except Exception as e:
+            self.log_message("ERROR", f"清理临时文件失败: {str(e)}")
+
+    def wait_for_threads(self):
+        """等待所有线程完成"""
+        try:
+            # 等待最多3秒
+            for _ in range(30):
+                running_threads = [t for t in self.crawler_threads if t.isRunning()]
+                if not running_threads:
+                    break
+                time.sleep(0.1)
+                
+            self.log_message("INFO", "所有线程已完成")
+            
+        except Exception as e:
+            self.log_message("ERROR", f"等待线程完成失败: {str(e)}")
 
     def dragEnterEvent(self, event):
         """拖拽进入事件"""
@@ -1896,7 +2268,7 @@ class MainWindow(QMainWindow):
                     if valid_count > 0:
                         self.log_message("INFO", f"通过粘贴添加了 {valid_count} 个链接")
                     else:
-                        self.log_message("WARNING", "没有添加任何有效链接")
+                        self.log_message("WARNING", "没有加任何有效链接")
             
             # Ctrl+S: 保存当前数据
             elif event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_S:
@@ -1966,7 +2338,7 @@ class MainWindow(QMainWindow):
                         <li>复制链接后按Ctrl+V粘贴</li>
                     </ul>
                 </li>
-                <li>开始爬取：
+                <li>开始爬：
                     <ul>
                         <li>选择要爬取的内容</li>
                         <li>点击"开始爬取"按钮</li>
@@ -2079,7 +2451,7 @@ class MainWindow(QMainWindow):
             self.log_message("ERROR", f"保存窗口状态失败: {str(e)}")
 
     def load_window_state(self):
-        """加载窗口状态"""
+        """加载窗状态"""
         try:
             if os.path.exists('window_state.json'):
                 with open('window_state.json', 'r') as f:
@@ -2127,7 +2499,7 @@ class MainWindow(QMainWindow):
             error_msg = str(error)
             
             if "ConnectionError" in error_type:
-                self.log_message("ERROR", "网络连接失败，请检查网络设置")
+                self.log_message("ERROR", "网络连接失败，检查网络置")
             elif "Timeout" in error_type:
                 self.log_message("ERROR", "请求超时，请稍后重试")
             elif "HTTPError" in error_type:
@@ -2310,7 +2682,7 @@ class MainWindow(QMainWindow):
                 except:
                     continue
             
-            # 创建柱状图
+            # 创柱状图
             if prices:
                 series = QBarSeries()
                 
@@ -2437,7 +2809,7 @@ class MainWindow(QMainWindow):
         """导出日志"""
         try:
             if not self.log_entries:
-                QMessageBox.warning(self, "警告", "没有可导出的日志！")
+                QMessageBox.warning(self, "警告", "没有可出的日志！")
                 return
 
             # 选择保存格式和位置
@@ -2454,7 +2826,7 @@ class MainWindow(QMainWindow):
             # 根据选择的格式导出
             if selected_filter == "HTML文件 (*.html)":
                 self.export_logs_html(file_name)
-            elif selected_filter == "Markdown文件 (*.md)":
+            elif selected_filter == "Markdown文 (*.md)":
                 self.export_logs_markdown(file_name)
             else:
                 self.export_logs_text(file_name)
@@ -2496,7 +2868,7 @@ class MainWindow(QMainWindow):
             </style>
         </head>
         <body>
-        <h1>爬虫日志</h1>
+        <h1>爬日志</h1>
         <p>导出时间: {}</p>
         <div class="log-content">
         """.format(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -2534,7 +2906,7 @@ class MainWindow(QMainWindow):
             f.write(markdown_content)
 
     def get_log_summary(self):
-        """获取日志摘要"""
+        """获取志摘要"""
         total = len(self.log_entries)
         info_count = sum(1 for entry in self.log_entries if entry['level'] == "INFO")
         warning_count = sum(1 for entry in self.log_entries if entry['level'] == "WARNING")
@@ -2549,27 +2921,38 @@ class MainWindow(QMainWindow):
 
 class ElementSelectorDialog(QDialog):
     """元素选择器对话框"""
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, template_name=None):
         super().__init__(parent)
         self.selected_elements = {}
+        self.template_name = template_name
         self.setWindowTitle("选择爬取内容")
         self.setMinimumWidth(500)
         self.init_ui()
 
     def init_ui(self):
-        """初始化界面"""
+        """初化界面"""
         layout = QVBoxLayout(self)
 
-        # 说明文字
-        instruction = QLabel("请在网页上选择要爬取的内容。\n点击\"添加选择器\"按钮后，在网页上点击相应元素即可。")
-        instruction.setWordWrap(True)
-        layout.addWidget(instruction)
+        # 模板选择
+        template_group = QGroupBox("模板管理")
+        template_layout = QHBoxLayout()
+        
+        self.template_combo = QComboBox()
+        self.refresh_templates()
+        template_layout.addWidget(QLabel("选择模板:"))
+        template_layout.addWidget(self.template_combo)
+        
+        save_template_btn = QPushButton("保存为模板")
+        save_template_btn.clicked.connect(self.save_as_template)
+        template_layout.addWidget(save_template_btn)
+        
+        template_group.setLayout(template_layout)
+        layout.addWidget(template_group)
 
         # 选择器列表
         selector_group = QGroupBox("已选择的内容")
         selector_layout = QVBoxLayout()
         
-        # 选择器表格
         self.selector_table = QTableWidget()
         self.selector_table.setColumnCount(4)
         self.selector_table.setHorizontalHeaderLabels(["名称", "选择器", "预览", "操作"])
@@ -2615,19 +2998,96 @@ class ElementSelectorDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
+        # 如果指定了模板，加载它
+        if self.template_name:
+            self.load_template(self.template_name)
+
+        # 连接模板选择信号
+        self.template_combo.currentTextChanged.connect(self.on_template_selected)
+
+    def refresh_templates(self):
+        """刷新模板列表"""
+        self.template_combo.clear()
+        self.template_combo.addItem("不使用模板")
+        templates = self.parent().template_manager.get_templates()
+        for name in templates.keys():
+            self.template_combo.addItem(name)
+
+    def on_template_selected(self, template_name):
+        """当选择模板时"""
+        if template_name and template_name != "不使用模板":
+            template = self.parent().template_manager.load_template(template_name)
+            if template:
+                self.load_template_data(template)
+
+    def load_template_data(self, template):
+        """加载模板数据"""
+        try:
+            # 清空现选择器
+            self.selector_table.setRowCount(0)
+            
+            # 添加模板中的选择器
+            for name, selector in template['selectors'].items():
+                self.add_selector_to_table(name, selector)
+                
+        except Exception as e:
+            QMessageBox.warning(self, "警告", f"加载模板失败: {str(e)}")
+
+    def save_as_template(self):
+        """保存为新模板"""
+        try:
+            name, ok = QInputDialog.getText(self, "保存模板", "请输入模板名称:")
+            if ok and name:
+                description, ok = QInputDialog.getText(self, "模板描述", "请输入模板描述:")
+                if ok:
+                    selectors = self.get_current_selectors()
+                    if self.parent().template_manager.save_template(name, selectors, description):
+                        QMessageBox.information(self, "成功", "模板保存成功！")
+                        self.refresh_templates()
+                        self.template_combo.setCurrentText(name)
+                    else:
+                        QMessageBox.warning(self, "错误", "保存模板失败！")
+                        
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"保存模板失败: {str(e)}")
+
+    def get_current_selectors(self):
+        """获取当前所有选择器"""
+        selectors = {}
+        for row in range(self.selector_table.rowCount()):
+            name = self.selector_table.item(row, 0).text()
+            selector = self.selector_table.item(row, 1).text()
+            selectors[name] = selector
+        return selectors
+
     def add_selector(self):
         """添加新的选择器"""
-        dialog = SelectorDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        try:
+            # 创建选择器对话框
+            selector_dialog = SelectorDialog(self)
+            if selector_dialog.exec() == QDialog.DialogCode.Accepted:
+                name = selector_dialog.name_input.text()
+                selector = selector_dialog.selector_input.text()
+                preview = selector_dialog.preview_text.toPlainText()
+                
+                # 添加到表格
+                self.add_selector_to_table(name, selector, preview)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"添加选择器失败: {str(e)}")
+
+    def add_selector_to_table(self, name, selector, preview=""):
+        """添加选择器到表格"""
+        try:
             row = self.selector_table.rowCount()
             self.selector_table.insertRow(row)
             
             # 添加名称
-            self.selector_table.setItem(row, 0, QTableWidgetItem(dialog.name))
+            self.selector_table.setItem(row, 0, QTableWidgetItem(name))
             # 添加选择器
-            self.selector_table.setItem(row, 1, QTableWidgetItem(dialog.selector))
+            self.selector_table.setItem(row, 1, QTableWidgetItem(selector))
             # 添加预览
-            self.selector_table.setItem(row, 2, QTableWidgetItem(dialog.preview))
+            self.selector_table.setItem(row, 2, QTableWidgetItem(preview))
             
             # 添加操作按钮
             btn_widget = QWidget()
@@ -2642,31 +3102,46 @@ class ElementSelectorDialog(QDialog):
             btn_layout.addWidget(edit_btn)
             btn_layout.addWidget(delete_btn)
             self.selector_table.setCellWidget(row, 3, btn_widget)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"添加选择器到表格失败: {str(e)}")
 
     def edit_selector(self, row):
         """编辑选择器"""
-        dialog = SelectorDialog(self)
-        dialog.name = self.selector_table.item(row, 0).text()
-        dialog.selector = self.selector_table.item(row, 1).text()
-        dialog.preview = self.selector_table.item(row, 2).text()
-        
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.selector_table.item(row, 0).setText(dialog.name)
-            self.selector_table.item(row, 1).setText(dialog.selector)
-            self.selector_table.item(row, 2).setText(dialog.preview)
+        try:
+            name = self.selector_table.item(row, 0).text()
+            selector = self.selector_table.item(row, 1).text()
+            preview = self.selector_table.item(row, 2).text()
+            
+            selector_dialog = SelectorDialog(self)
+            selector_dialog.name_input.setText(name)
+            selector_dialog.selector_input.setText(selector)
+            selector_dialog.preview_text.setText(preview)
+            
+            if selector_dialog.exec() == QDialog.DialogCode.Accepted:
+                self.selector_table.item(row, 0).setText(selector_dialog.name_input.text())
+                self.selector_table.item(row, 1).setText(selector_dialog.selector_input.text())
+                self.selector_table.item(row, 2).setText(selector_dialog.preview_text.toPlainText())
+                
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"编辑选择器失败: {str(e)}")
 
     def delete_selector(self, row):
         """删除选择器"""
-        reply = QMessageBox.question(
-            self,
-            '确认删除',
-            '确定要删除这个选择器吗？',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self.selector_table.removeRow(row)
+        try:
+            reply = QMessageBox.question(
+                self,
+                '确认删除',
+                '确定要删除这个选择器吗？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                self.selector_table.removeRow(row)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "错���", f"删除选择器失败: {str(e)}")
 
     def accept(self):
         """确认选择"""
@@ -2677,7 +3152,7 @@ class ElementSelectorDialog(QDialog):
                 name = self.selector_table.item(row, 0).text()
                 selector = self.selector_table.item(row, 1).text()
                 selectors[name] = selector
-            
+                
             if not selectors:
                 QMessageBox.warning(self, "警告", "请至少添加一个选择器！")
                 return
@@ -2712,7 +3187,7 @@ class SelectorDialog(QDialog):
         name_layout = QHBoxLayout()
         name_layout.addWidget(QLabel("名称:"))
         self.name_input = QLineEdit(self.name)
-        self.name_input.setPlaceholderText("例如：商品图片、详情图等")
+        self.name_input.setPlaceholderText("例如：商品标题、价格等")
         name_layout.addWidget(self.name_input)
         layout.addLayout(name_layout)
         
@@ -2721,12 +3196,13 @@ class SelectorDialog(QDialog):
         selector_layout.addWidget(QLabel("选择器:"))
         self.selector_input = QLineEdit(self.selector)
         self.selector_input.setPlaceholderText('点击"选择"按钮在网页上选择元素')
+        self.selector_input.setReadOnly(True)
         selector_layout.addWidget(self.selector_input)
         
-        # 添加多选按钮
-        self.multi_select = QCheckBox("选择多个相同元素")
-        self.multi_select.setChecked(False)
-        selector_layout.addWidget(self.multi_select)
+        # 批量选择选项
+        self.batch_select = QCheckBox("选择所有同类元素")
+        self.batch_select.setChecked(True)
+        selector_layout.addWidget(self.batch_select)
         
         pick_btn = QPushButton("选择")
         pick_btn.clicked.connect(self.pick_element)
@@ -2757,9 +3233,12 @@ class SelectorDialog(QDialog):
     def pick_element(self):
         """选择网页元素"""
         try:
-            # 获取当前正在爬取的URL
-            main_window = self.parent().parent()
-            if not hasattr(main_window, 'url_list') or main_window.url_list.count() == 0:
+            # 获取主窗口
+            main_window = self.parent()
+            while main_window and not isinstance(main_window, MainWindow):
+                main_window = main_window.parent()
+                
+            if not main_window or not hasattr(main_window, 'url_list') or main_window.url_list.count() == 0:
                 QMessageBox.warning(self, "警告", "请先添加要爬取的URL！")
                 return
                 
@@ -2767,84 +3246,145 @@ class SelectorDialog(QDialog):
             
             # 创建浏览器实例
             from selenium import webdriver
-            options = webdriver.ChromeOptions()
-            self.browser = webdriver.Chrome(options=options)
+            from selenium.webdriver.chrome.service import Service
             
-            # 打开网页
+            # 配置Chrome选项
+            options = webdriver.ChromeOptions()
+            options.add_argument('--start-maximized')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_experimental_option('detach', True)
+            
+            # 创建Service对象
+            service = Service()
+            
+            # 创建浏览器实例
+            self.browser = webdriver.Chrome(service=service, options=options)
+            
+            # 打网页
             self.browser.get(url)
             
-            # 注入选择器工具
+            # 注入选择器工具的JavaScript代码
             js_code = """
             // 创建样式
             var style = document.createElement('style');
             style.textContent = `
                 .element-picker-hover { 
-                    outline: 2px dashed red !important; 
+                    outline: 3px dashed #FF4444 !important;
+                    outline-offset: 2px !important;
+                    cursor: pointer !important;
                 }
                 .element-picker-selected { 
-                    outline: 2px solid green !important; 
+                    outline: 5px solid #44FF44 !important;
+                    outline-offset: 3px !important;
+                    background-color: rgba(0, 255, 0, 0.15) !important;
+                    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5) !important;
+                }
+                .element-picker-similar {
+                    outline: 3px solid #4444FF !important;
+                    outline-offset: 2px !important;
+                    background-color: rgba(0, 0, 255, 0.1) !important;
                 }
             `;
             document.head.appendChild(style);
             
-            // 当前悬停的元素
+            var isBatchSelect = arguments[0];  // 从Python传入是否批量选择
             var hoveredElement = null;
             var selectedElements = [];
-            var isMultiSelect = arguments[0];  // 从Python传入是否多选
             
-            // 鼠标移动事件处理
             function handleMouseMove(e) {
-                e.preventDefault();
-                e.stopPropagation();
+                if (e.target.classList.contains('element-picker-selected')) {
+                    return;  // 已选中的元素不显示悬停效果
+                }
                 
-                if (hoveredElement) {
+                if (hoveredElement && hoveredElement !== e.target) {
                     hoveredElement.classList.remove('element-picker-hover');
+                    // 移除之前悬停元素的相似元素标记
+                    if (isBatchSelect) {
+                        var oldSelector = generateSelector(hoveredElement);
+                        document.querySelectorAll(oldSelector).forEach(el => {
+                            if (el !== hoveredElement && !el.classList.contains('element-picker-selected')) {
+                                el.classList.remove('element-picker-similar');
+                            }
+                        });
+                    }
                 }
                 
                 hoveredElement = e.target;
                 hoveredElement.classList.add('element-picker-hover');
+                
+                // 显示新悬停元素的相似元素
+                if (isBatchSelect) {
+                    var newSelector = generateSelector(hoveredElement);
+                    document.querySelectorAll(newSelector).forEach(el => {
+                        if (el !== hoveredElement && !el.classList.contains('element-picker-selected')) {
+                            el.classList.add('element-picker-similar');
+                        }
+                    });
+                }
+                
+                e.stopPropagation();
             }
             
-            // 点击事件处理
+            function handleMouseOut(e) {
+                if (hoveredElement) {
+                    hoveredElement.classList.remove('element-picker-hover');
+                    // 移除相似元素标记
+                    if (isBatchSelect) {
+                        var selector = generateSelector(hoveredElement);
+                        document.querySelectorAll(selector).forEach(el => {
+                            if (el !== hoveredElement && !el.classList.contains('element-picker-selected')) {
+                                el.classList.remove('element-picker-similar');
+                            }
+                        });
+                    }
+                }
+            }
+            
             function handleClick(e) {
                 e.preventDefault();
                 e.stopPropagation();
                 
                 var element = e.target;
+                var selector = generateSelector(element);
                 
-                if (isMultiSelect) {
-                    // 多选模式
-                    element.classList.add('element-picker-selected');
-                    selectedElements.push(element);
-                    
-                    // 查找所有相似元素
-                    var selector = generateSelector(element);
+                // 移除之前的选中状态
+                selectedElements.forEach(el => {
+                    el.classList.remove('element-picker-selected');
+                });
+                selectedElements = [];
+                
+                if (isBatchSelect) {
+                    // 批量选择所有相似元素
                     var similarElements = document.querySelectorAll(selector);
-                    similarElements.forEach(function(el) {
-                        if (!selectedElements.includes(el)) {
-                            el.classList.add('element-picker-selected');
-                            selectedElements.push(el);
-                        }
+                    selectedElements = Array.from(similarElements);
+                    
+                    // 标记所有选中的元素
+                    similarElements.forEach(el => {
+                        el.classList.remove('element-picker-similar');
+                        el.classList.remove('element-picker-hover');
+                        el.classList.add('element-picker-selected');
                     });
                 } else {
-                    // 单选模式
+                    // 单个选择
+                    element.classList.remove('element-picker-hover');
                     element.classList.add('element-picker-selected');
                     selectedElements = [element];
                 }
                 
-                // 生成选择器
-                var selector = generateSelector(element);
-                
-                // 获取预览内容
-                var previewTexts = selectedElements.map(el => el.innerText.trim());
-                
                 // 返回结果
                 window.selectedElement = {
                     selector: selector,
-                    text: previewTexts.join('\\n'),
+                    text: selectedElements.map(el => el.innerText.trim()).join('\\n'),
                     count: selectedElements.length
                 };
             }
+            
+            // 添加事件监听
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseout', handleMouseOut);
+            document.addEventListener('click', handleClick);
             
             // 生成选择器
             function generateSelector(element) {
@@ -2853,50 +3393,34 @@ class SelectorDialog(QDialog):
                 }
                 
                 var selector = element.tagName.toLowerCase();
-                if (element.className) {
-                    var classes = element.className.split(' ')
-                        .filter(c => c && !c.startsWith('element-picker'))
-                        .map(c => '.' + c)
-                        .join('');
+                var classes = Array.from(element.classList)
+                    .filter(c => !c.startsWith('element-picker-'))
+                    .map(c => '.' + c)
+                    .join('');
+                    
+                if (classes) {
                     selector += classes;
                 }
                 
-                // 添加父元素选择器
-                var parent = element.parentElement;
-                var index = 0;
-                while (parent && parent.tagName !== 'BODY' && index < 3) {
-                    var parentSelector = parent.tagName.toLowerCase();
-                    if (parent.id) {
-                        selector = '#' + parent.id + ' ' + selector;
-                        break;
+                // 添加属性选择器
+                ['name', 'type', 'data-id'].forEach(attr => {
+                    if (element.hasAttribute(attr)) {
+                        selector += `[${attr}="${element.getAttribute(attr)}"]`;
                     }
-                    if (parent.className) {
-                        var classes = parent.className.split(' ')
-                            .filter(c => c && !c.startsWith('element-picker'))
-                            .map(c => '.' + c)
-                            .join('');
-                        parentSelector += classes;
-                    }
-                    selector = parentSelector + ' ' + selector;
-                    parent = parent.parentElement;
-                    index++;
-                }
+                });
                 
                 return selector;
             }
+            """
             
-            // 添加事件监听
-            document.addEventListener('mousemove', handleMouseMove);
-            document.addEventListener('click', handleClick);
-            """, self.multi_select.isChecked()  // 传入是否多选的状态
-            
-            self.browser.execute_script(js_code)
+            # 执行JavaScript代码，传入批量选择状态
+            self.browser.execute_script(js_code, self.batch_select.isChecked())
             
             # 显示提示
-            if self.multi_select.isChecked():
-                msg = "请在网页上点击要爬取的元素，将自动选择所有相似元素。选择完成后关闭浏览器窗口。"
+            if self.batch_select.isChecked():
+                msg = "请点击任意元素，将自动选择所有相似元素。选择完成后关闭浏览器窗口。"
             else:
-                msg = "请在网页上点击要爬取的元素，选择完成后关闭浏览器窗口。"
+                msg = "请点击要爬取的元素，选择完成后关闭浏览器窗口。"
             QMessageBox.information(self, "提示", msg)
             
             # 等待选择结果
@@ -2905,116 +3429,294 @@ class SelectorDialog(QDialog):
                     result = self.browser.execute_script("return window.selectedElement;")
                     if result:
                         self.selector_input.setText(result['selector'])
-                        preview = f"已选择 {result['count']} 个元素:\n{result['text']}"
-                        self.preview_text.setText(preview)
+                        self.preview_text.setText(result['text'])
                         break
                 except:
                     pass
                 QApplication.processEvents()
                 
         except Exception as e:
-            self.log_message("ERROR", f"选择元素失败: {str(e)}")
-            QMessageBox.critical(self, "错误", f"选择失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"选择元素失败: {str(e)}")
         finally:
             if self.browser:
-                self.browser.quit()
+                try:
+                    self.browser.quit()
+                except:
+                    pass
                 self.browser = None
 
     def accept(self):
         """确认对话框"""
-        name = self.name_input.text().strip()
-        selector = self.selector_input.text().strip()
-        
-        if not name:
-            QMessageBox.warning(self, "警告", "请输入选择器名称！")
-            return
+        try:
+            name = self.name_input.text().strip()
+            selector = self.selector_input.text().strip()
             
-        if not selector:
-            QMessageBox.warning(self, "警告", "请选择要爬取的元素！")
-            return
+            if not name:
+                QMessageBox.warning(self, "警告", "请输入选择器名称！")
+                return
+                
+            if not selector:
+                QMessageBox.warning(self, "警告", "请选择要爬取的元素！")
+                return
+                
+            super().accept()
             
-        self.name = name
-        self.selector = selector
-        self.preview = self.preview_text.toPlainText()
-        
-        super().accept()
-
-    def closeEvent(self, event):
-        """关闭事件"""
-        if self.browser:
-            self.browser.quit()
-            self.browser = None
-        super().closeEvent(event)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"确认选择失败: {str(e)}")
 
 class CrawlerThread(QThread):
-    """爬虫线程"""
-    progress = pyqtSignal(str, str)  # 发送进度信息 (level, message)
-    result = pyqtSignal(dict)  # 发送爬取结果
-    error = pyqtSignal(str, str)  # 发送错误信息 (url, error_message)
-    finished = pyqtSignal(bool)  # 发送完成状态
-    
-    def __init__(self, url, platform, selected_elements):
+    progress = pyqtSignal(str, str)  # 类型, 消息
+    result = pyqtSignal(dict)  # 爬取结果
+    error = pyqtSignal(str, str)  # URL, 错误信息
+    status_changed = pyqtSignal(str)  # 状态
+    retry_count_changed = pyqtSignal(int)  # 重试次数
+    finished = pyqtSignal(bool)  # 是否成功
+
+    def __init__(self, url, platform, selected_elements, max_retries=3):
         super().__init__()
         self.url = url
         self.platform = platform
         self.selected_elements = selected_elements
         self.should_stop = False
-        
+        self.max_retries = max_retries
+        self.current_retry = 0
+        self.browser = None
+
     def run(self):
         """运行爬虫"""
         try:
             if self.should_stop:
                 return
                 
+            self.status_changed.emit("running")
             self.progress.emit("INFO", f"开始爬取: {self.url}")
             
-            # 根据平台选择爬虫
-            if self.platform == "微店":
-                from .main import WeidianSpider
-                spider = WeidianSpider()
-            else:
-                from .pdd_spider import PddSpider
-                spider = PddSpider()
-            
-            # 设置爬取延迟
-            if 'delay' in self.selected_elements:
-                time.sleep(self.selected_elements['delay'])
+            # 创建浏览器实例
+            if not self.browser:
+                from selenium import webdriver
+                from selenium.webdriver.chrome.service import Service
+                from selenium.webdriver.chrome.options import Options
+                from selenium.webdriver.common.by import By
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
                 
+                options = Options()
+                options.add_argument('--start-maximized')
+                options.add_argument('--disable-gpu')
+                options.add_argument('--no-sandbox')
+                options.add_argument('--disable-dev-shm-usage')
+                
+                service = Service()
+                self.browser = webdriver.Chrome(service=service, options=options)
+                self.browser.set_page_load_timeout(30)
+            
             # 爬取数据
-            result = spider.get_product_info(self.url)
-            
-            if result:
-                # 根据选择的元素过滤数据
-                filtered_result = {}
-                for key, value in result.items():
-                    if key in self.selected_elements['selectors']:
-                        filtered_result[key] = value
+            try:
+                # 打开页面
+                self.browser.get(self.url)
+                WebDriverWait(self.browser, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
                 
-                self.progress.emit("INFO", f"爬取成功: {filtered_result.get('title', '')}")
+                # 获取数据
+                result = {}
+                for name, selector in self.selected_elements['selectors'].items():
+                    try:
+                        elements = self.browser.find_elements(By.CSS_SELECTOR, selector)
+                        if name.lower().endswith(('images', 'imgs', 'pictures')):
+                            # 处理图片元素
+                            image_urls = []
+                            for element in elements:
+                                if element.tag_name == 'img':
+                                    src = element.get_attribute('src')
+                                    if src:
+                                        image_urls.append(src)
+                                else:
+                                    imgs = element.find_elements(By.TAG_NAME, 'img')
+                                    for img in imgs:
+                                        src = img.get_attribute('src')
+                                        if src:
+                                            image_urls.append(src)
+                            result[name] = image_urls
+                            
+                            # 下载图片
+                            if self.selected_elements.get('download_images', False):
+                                self.download_images(name, image_urls)
+                        else:
+                            # 处理文本元素
+                            texts = [elem.text.strip() for elem in elements if elem.text.strip()]
+                            result[name] = texts[0] if len(texts) == 1 else texts if texts else None
+                            
+                    except Exception as e:
+                        self.progress.emit("WARNING", f"获取元素 {name} 失败: {str(e)}")
+                        result[name] = None
+                
+                if not any(result.values()):
+                    raise Exception("未获取到任何数据")
+                
+                # 确保至少有一个有效值
+                if not any(v for v in result.values() if v is not None):
+                    raise Exception("所有元素都为空")
                 
                 # 构建完整数据
                 data = {
                     'url': self.url,
                     'platform': self.platform,
-                    'data': filtered_result,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    'data': result,  # 不进行JSON序列化
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'retry_count': self.current_retry
                 }
                 
                 self.result.emit(data)
+                self.status_changed.emit("success")
                 self.finished.emit(True)
-            else:
-                error_msg = "爬取结果为空"
-                self.error.emit(self.url, error_msg)
-                self.finished.emit(False)
+                return
                 
+            except Exception as e:
+                if self.should_stop:
+                    return
+                    
+                self.current_retry += 1
+                self.retry_count_changed.emit(self.current_retry)
+                
+                if self.current_retry < self.max_retries:
+                    self.progress.emit("WARNING", f"第 {self.current_retry} 次重试: {str(e)}")
+                    self.status_changed.emit("retrying")
+                    time.sleep(min(self.current_retry * 2, 10))
+                    
+                    if self.browser:
+                        try:
+                            self.browser.quit()
+                        except:
+                            pass
+                        self.browser = None
+                    
+                    self.run()
+                else:
+                    self.error.emit(self.url, str(e))
+                    self.status_changed.emit("failed")
+                    self.finished.emit(False)
+                    
         except Exception as e:
             self.error.emit(self.url, str(e))
+            self.status_changed.emit("failed")
             self.finished.emit(False)
+        finally:
+            if self.browser:
+                try:
+                    self.browser.quit()
+                except:
+                    pass
+                self.browser = None
+
+    def download_images(self, name, image_urls):
+        """下载图片"""
+        try:
+            # 创建保存目录
+            save_dir = os.path.join('downloads', 
+                                  f"{self.url.split('?')[0].split('/')[-1]}_{int(time.time())}")
+            img_dir = os.path.join(save_dir, name)
+            os.makedirs(img_dir, exist_ok=True)
             
+            # 下载图片
+            for i, url in enumerate(image_urls):
+                try:
+                    response = requests.get(url, timeout=30)
+                    if response.status_code == 200:
+                        file_path = os.path.join(img_dir, f'image_{i+1}.jpg')
+                        with open(file_path, 'wb') as f:
+                            f.write(response.content)
+                        self.progress.emit("INFO", f"已下载图片 {i+1}/{len(image_urls)}")
+                except Exception as e:
+                    self.progress.emit("WARNING", f"下载图片 {i+1} 失败: {str(e)}")
+                    
+        except Exception as e:
+            self.progress.emit("ERROR", f"创建图片目录失败: {str(e)}")
+
     def stop(self):
         """停止爬虫"""
-        self.should_stop = True
-        self.progress.emit("INFO", "正在停止爬取...")
+        try:
+            self.should_stop = True
+            self.status_changed.emit("stopped")
+            
+            # 关闭浏览器
+            if self.browser:
+                try:
+                    self.browser.quit()
+                except:
+                    pass
+                finally:
+                    self.browser = None
+            
+            # 等待线程完成
+            self.wait(1000)  # 等待最多1秒
+            
+        except Exception as e:
+            print(f"Error stopping crawler thread: {str(e)}")
+
+    def handle_crawler_result(self, result):
+        """处理爬虫结果"""
+        try:
+            # 解析数据
+            data = json.loads(result['data'])
+            
+            # 保存到数据库
+            self.db.save_record(result)
+            self.log_message("INFO", f"数据已保存: {data.get('title', '未知标题')}")
+            
+            # 更新历史记录表格
+            self.refresh_history()
+            
+        except Exception as e:
+            self.log_message("ERROR", f"保存数据失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"保存失败: {str(e)}")
+
+    def download_media_files(self, result, record_id):
+        """下载媒体文件"""
+        try:
+            # 创建保存目录
+            base_dir = os.path.join('downloads', f"{record_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            
+            # 下载图片
+            if 'images' in result:
+                image_dir = os.path.join(base_dir, 'images')
+                os.makedirs(image_dir, exist_ok=True)
+                
+                for i, img_url in enumerate(result['images']):
+                    try:
+                        response = requests.get(img_url, timeout=30)
+                        if response.status_code == 200:
+                            file_path = os.path.join(image_dir, f'image_{i+1}.jpg')
+                            with open(file_path, 'wb') as f:
+                                f.write(response.content)
+                            # 保存记录
+                            self.parent().db.save_media_file(record_id, 'image', file_path, img_url)
+                            self.progress.emit("INFO", f"已下载图片 {i+1}")
+                    except Exception as e:
+                        self.progress.emit("WARNING", f"下载图片失败: {str(e)}")
+            
+            # 下载视频
+            if 'videos' in result:
+                video_dir = os.path.join(base_dir, 'videos')
+                os.makedirs(video_dir, exist_ok=True)
+                
+                for i, video_url in enumerate(result['videos']):
+                    try:
+                        response = requests.get(video_url, timeout=60, stream=True)
+                        if response.status_code == 200:
+                            file_path = os.path.join(video_dir, f'video_{i+1}.mp4')
+                            with open(file_path, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=8192):
+                                    if chunk:
+                                        f.write(chunk)
+                            # 保存记录
+                            self.parent().db.save_media_file(record_id, 'video', file_path, video_url)
+                            self.progress.emit("INFO", f"已下载视频 {i+1}")
+                    except Exception as e:
+                        self.progress.emit("WARNING", f"下载视频失败: {str(e)}")
+                        
+        except Exception as e:
+            self.progress.emit("ERROR", f"下载媒体文件失败: {str(e)}")
 
 def main():
     """程序入口函数"""
@@ -3034,7 +3736,7 @@ def main():
         def handle_exception(exc_type, exc_value, exc_traceback):
             error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
             QMessageBox.critical(None, "错误", 
-                f"程序发生错误:\n{str(exc_value)}\n\n详细信息已记录到日志文件。")
+                f"程序发生错误:\n{str(exc_value)}\n\n详细信息已记到日志文件。")
             logging.error(error_msg)
             
         sys.excepthook = handle_exception

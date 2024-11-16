@@ -34,15 +34,16 @@ class DatabaseManager:
         )
         ''')
         
-        # 爬取统计表
+        # 媒体文件表
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS statistics (
+        CREATE TABLE IF NOT EXISTS media_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            total_crawls INTEGER DEFAULT 0,
-            successful_crawls INTEGER DEFAULT 0,
-            failed_crawls INTEGER DEFAULT 0,
-            platform TEXT NOT NULL
+            record_id INTEGER NOT NULL,
+            file_type TEXT NOT NULL,  -- 'image' or 'video'
+            file_path TEXT NOT NULL,
+            original_url TEXT NOT NULL,
+            download_time TEXT NOT NULL,
+            FOREIGN KEY (record_id) REFERENCES records(id)
         )
         ''')
         
@@ -52,15 +53,20 @@ class DatabaseManager:
         """保存爬取记录"""
         try:
             cursor = self.conn.cursor()
+            
+            # 确保数据是JSON字符串
+            data = record['data']
+            if isinstance(data, dict):
+                data = json.dumps(data, ensure_ascii=False)
+            
             cursor.execute('''
-            INSERT INTO records (url, platform, data, timestamp, template_name, status)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO records (url, platform, data, timestamp, status)
+            VALUES (?, ?, ?, ?, ?)
             ''', (
                 record['url'],
                 record['platform'],
-                json.dumps(record['data'], ensure_ascii=False),
+                data,  # 已序列化的数据
                 record['timestamp'],
-                record.get('template_name'),
                 'success'
             ))
             
@@ -68,23 +74,50 @@ class DatabaseManager:
             self.update_statistics(record['platform'], True)
             
             self.conn.commit()
-            return True
+            return cursor.lastrowid
+            
         except Exception as e:
             print(f"Database error: {str(e)}")
-            return False
+            return None
             
     def get_all_records(self):
         """获取所有记录"""
-        cursor = self.conn.cursor()
-        cursor.execute('''
-        SELECT id, url, platform, data, timestamp, template_name, status, error_message 
-        FROM records 
-        ORDER BY timestamp DESC
-        ''')
-        
-        columns = ['id', 'url', 'platform', 'data', 'timestamp', 
-                  'template_name', 'status', 'error_message']
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+            SELECT id, url, platform, data, timestamp, template_name, status, error_message 
+            FROM records 
+            ORDER BY timestamp DESC
+            ''')
+            
+            columns = ['id', 'url', 'platform', 'data', 'timestamp', 
+                      'template_name', 'status', 'error_message']
+            records = []
+            
+            for row in cursor.fetchall():
+                try:
+                    record = dict(zip(columns, row))
+                    
+                    # 尝试解析JSON数据
+                    if record['data']:
+                        try:
+                            record['data'] = json.loads(record['data'])
+                        except json.JSONDecodeError:
+                            record['data'] = {'error': '数据格式错误'}
+                    else:
+                        record['data'] = {}
+                        
+                    records.append(record)
+                    
+                except Exception as e:
+                    print(f"Error processing record: {str(e)}")
+                    continue
+                    
+            return records
+            
+        except Exception as e:
+            print(f"Error getting records: {str(e)}")
+            return []
         
     def get_records_by_ids(self, record_ids):
         """根据ID获取记录"""
@@ -158,3 +191,36 @@ class DatabaseManager:
         """关闭数据库连接"""
         if self.conn:
             self.conn.close() 
+        
+    def save_media_file(self, record_id, file_type, file_path, original_url):
+        """保存媒体文件记录"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+            INSERT INTO media_files (record_id, file_type, file_path, original_url, download_time)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (record_id, file_type, file_path, original_url, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error saving media file: {str(e)}")
+            return False 
+
+    def delete_record(self, record_id):
+        """删除记录"""
+        try:
+            cursor = self.conn.cursor()
+            
+            # 删除相关的媒体文件记录
+            cursor.execute('DELETE FROM media_files WHERE record_id = ?', (record_id,))
+            
+            # 删除主记录
+            cursor.execute('DELETE FROM records WHERE id = ?', (record_id,))
+            
+            self.conn.commit()
+            return True
+            
+        except Exception as e:
+            print(f"Error deleting record: {str(e)}")
+            return False 
